@@ -16,4 +16,7 @@ export function useNetworkStatus(): boolean {
   }, []);
 
   return isConnected;
-} 
+}
+
+// Add default export
+export default useNetworkStatus; 

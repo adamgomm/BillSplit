@@ -7,13 +7,14 @@ import {
   TouchableOpacity,
   Alert,
   Modal,
-  Linking,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useNavigation } from 'expo-router';
 import { useTheme } from '../contexts/ThemeContext';
 import { useExpenses } from '../contexts/ExpenseContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { handlePaymentRedirect } from '../lib/paymentUtils';
 
 interface PaymentMethod {
   id: string;
@@ -30,6 +31,7 @@ interface FriendBalance {
 export default function SettleUpScreen() {
   const { colors } = useTheme();
   const router = useRouter();
+  const navigation = useNavigation();
   const { expenses } = useExpenses();
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [selectedFriend, setSelectedFriend] = useState<FriendBalance | null>(null);
@@ -155,7 +157,6 @@ export default function SettleUpScreen() {
   const handlePayment = async (friend: FriendBalance, paymentMethod: PaymentMethod) => {
     const isOwedToYou = friend.amount > 0;
     const amount = Math.abs(friend.amount);
-    
     const actionText = isOwedToYou ? 'request payment from' : 'send payment to';
     const methodName = paymentMethod.type === 'cashapp' ? 'Cash App' : 'Venmo';
     
@@ -168,29 +169,23 @@ export default function SettleUpScreen() {
           text: 'Continue',
           onPress: async () => {
             try {
-              const paymentLink = generatePaymentLink(friend, paymentMethod);
-              const supported = await Linking.canOpenURL(paymentLink);
+              await handlePaymentRedirect({
+                type: paymentMethod.type,
+                username: paymentMethod.username,
+                amount: amount,
+                note: `Payment for shared expenses - ${isOwedToYou ? `${friend.name} owes you` : `You owe ${friend.name}`}`
+              });
               
-              if (supported) {
-                await Linking.openURL(paymentLink);
-                setModalVisible(false);
-                
-                // Show success message
-                setTimeout(() => {
-                  Alert.alert(
-                    'Payment Initiated',
-                    `${methodName} should now be open with the payment details pre-filled.`,
-                    [{ text: 'OK' }]
-                  );
-                }, 1000);
-              } else {
-                // Fallback: show payment details to copy manually
+              setModalVisible(false);
+              
+              // Show success message
+              setTimeout(() => {
                 Alert.alert(
-                  'Payment Details',
-                  `${methodName} app not found. Here are the payment details:\n\nRecipient: ${paymentMethod.username}\nAmount: $${amount.toFixed(2)}\nNote: Payment for shared expenses`,
-                  [{ text: 'Copy Link', onPress: () => console.log('Copy:', paymentLink) }]
+                  'Payment Initiated',
+                  `${methodName} should now be open with the payment details pre-filled.`,
+                  [{ text: 'OK' }]
                 );
-              }
+              }, 1000);
             } catch (error) {
               console.error('Error opening payment app:', error);
               Alert.alert('Error', 'Could not open payment app. Please try again.');
@@ -199,6 +194,15 @@ export default function SettleUpScreen() {
         },
       ]
     );
+  };
+
+  const handleBack = () => {
+    if (navigation.canGoBack()) {
+      router.back();
+    } else {
+      // If we can't go back, navigate to the home/dashboard
+      router.push('/(tabs)');
+    }
   };
 
   const dynamicStyles = StyleSheet.create({
@@ -423,7 +427,7 @@ export default function SettleUpScreen() {
       <View style={dynamicStyles.header}>
         <TouchableOpacity
           style={dynamicStyles.backButton}
-          onPress={() => router.back()}
+          onPress={handleBack}
         >
           <Ionicons name="chevron-back" size={24} color={colors.textDark} />
         </TouchableOpacity>

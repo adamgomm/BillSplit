@@ -1,7 +1,6 @@
 import React, { createContext, useState, useContext, ReactNode, useCallback, useEffect } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { supabaseUrl, supabaseAnonKey, supabaseAuthConfig } from '../lib/supabaseClient';
+import { supabaseUrl, supabaseAnonKey } from '../lib/supabaseClient';
 
 interface PaymentMethod {
   id: string;
@@ -22,6 +21,14 @@ interface PaymentContextType {
 
 const PaymentContext = createContext<PaymentContextType | undefined>(undefined);
 
+export const usePayment = () => {
+  const context = useContext(PaymentContext);
+  if (!context) {
+    throw new Error('usePayment must be used within a PaymentProvider');
+  }
+  return context;
+};
+
 interface PaymentProviderProps {
   children: ReactNode;
 }
@@ -34,7 +41,7 @@ export const PaymentProvider: React.FC<PaymentProviderProps> = ({ children }) =>
 
   // Initialize Supabase client
   useEffect(() => {
-    const client = createClient(supabaseUrl, supabaseAnonKey, supabaseAuthConfig);
+    const client = createClient(supabaseUrl, supabaseAnonKey);
     setSupabase(client);
   }, []);
 
@@ -45,7 +52,7 @@ export const PaymentProvider: React.FC<PaymentProviderProps> = ({ children }) =>
     setError(null);
   }, []);
 
-  // Function to load payment methods for the current user
+  // Function to load payment methods from Supabase
   const loadPaymentMethods = useCallback(async () => {
     if (!supabase) return;
 
@@ -60,66 +67,64 @@ export const PaymentProvider: React.FC<PaymentProviderProps> = ({ children }) =>
         return;
       }
 
-      const storageKey = `paymentMethods_${user.id}`;
-      const stored = await AsyncStorage.getItem(storageKey);
-      if (stored) {
-        const userPaymentMethods = JSON.parse(stored);
-        setPaymentMethods(userPaymentMethods);
-        console.log('[PaymentContext] Payment methods loaded for user:', user.id, 'Count:', userPaymentMethods.length);
+      // Get payment method from profiles table
+      const { data, error: profileError } = await supabase
+        .from('profiles')
+        .select('Payment')
+        .eq('id', user.id)
+        .single();
+
+      if (profileError) throw profileError;
+
+      if (data?.Payment) {
+        // Convert the single payment string to our PaymentMethod format
+        const paymentMethod: PaymentMethod = {
+          id: '1', // Since we only have one payment method now
+          type: data.Payment.startsWith('$') ? 'cashapp' : 'venmo',
+          username: data.Payment,
+          displayName: data.Payment.startsWith('$') ? 'Cash App' : 'Venmo'
+        };
+        setPaymentMethods([paymentMethod]);
+        console.log('[PaymentContext] Payment method loaded for user:', user.id);
       } else {
         setPaymentMethods([]);
-        console.log('[PaymentContext] No payment methods found for user:', user.id);
+        console.log('[PaymentContext] No payment method found for user:', user.id);
       }
     } catch (err: any) {
-      console.error('Error loading payment methods:', err);
-      setError(err.message || 'Failed to load payment methods');
+      console.error('[PaymentContext] Error loading payment method:', err);
+      setError(err.message || 'Failed to load payment method');
     } finally {
       setLoading(false);
     }
   }, [supabase, clearAllPaymentMethods]);
 
-  // Listen to auth state changes to fetch/clear data automatically
-  useEffect(() => {
-    if (!supabase) return;
-    
-    // Fetch initial data on load
-    loadPaymentMethods();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log(`[PaymentContext] Auth state changed: ${event}`);
-      if (event === 'SIGNED_IN') {
-        loadPaymentMethods();
-      }
-      if (event === 'SIGNED_OUT') {
-        clearAllPaymentMethods();
-      }
-    });
-
-    return () => {
-      // Cleanup the listener on component unmount
-      authListener.subscription.unsubscribe();
-    };
-  }, [supabase, loadPaymentMethods, clearAllPaymentMethods]);
-
+  // Save payment method to Supabase
   const savePaymentMethods = async (methods: PaymentMethod[]) => {
     if (!supabase) {
       throw new Error('Supabase client not initialized');
     }
 
     try {
-      // Get current user
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         throw new Error('User not authenticated');
       }
 
-      // Save payment methods with user-specific key
-      const storageKey = `paymentMethods_${user.id}`;
-      await AsyncStorage.setItem(storageKey, JSON.stringify(methods));
+      // Save the username of the first payment method (since we only support one now)
+      const paymentUsername = methods.length > 0 ? methods[0].username : null;
+
+      // Update Payment in profiles table
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ Payment: paymentUsername })
+        .eq('id', user.id);
+
+      if (updateError) throw updateError;
+
       setPaymentMethods(methods);
-      console.log('[PaymentContext] Payment methods saved for user:', user.id);
+      console.log('[PaymentContext] Payment method saved for user:', user.id);
     } catch (err: any) {
-      console.error('Error saving payment methods:', err);
+      console.error('[PaymentContext] Error saving payment method:', err);
       throw new Error(err.message || 'Failed to save payment method');
     }
   };
@@ -134,32 +139,53 @@ export const PaymentProvider: React.FC<PaymentProviderProps> = ({ children }) =>
         id: Date.now().toString(),
       };
 
-      const updatedMethods = [...paymentMethods, newMethod];
-      await savePaymentMethods(updatedMethods);
+      // Since we only support one payment method, replace any existing ones
+      await savePaymentMethods([newMethod]);
     } catch (err: any) {
-      console.error('Error adding payment method:', err);
+      console.error('[PaymentContext] Error adding payment method:', err);
       setError(err.message || 'Failed to add payment method');
       throw err;
     } finally {
       setLoading(false);
     }
-  }, [paymentMethods]);
+  }, []);
 
   const removePaymentMethod = useCallback(async (id: string) => {
     try {
       setLoading(true);
       setError(null);
       
-      const updatedMethods = paymentMethods.filter(method => method.id !== id);
-      await savePaymentMethods(updatedMethods);
+      // Clear the payment method
+      await savePaymentMethods([]);
     } catch (err: any) {
-      console.error('Error removing payment method:', err);
+      console.error('[PaymentContext] Error removing payment method:', err);
       setError(err.message || 'Failed to remove payment method');
       throw err;
     } finally {
       setLoading(false);
     }
-  }, [paymentMethods]);
+  }, []);
+
+  // Listen to auth state changes
+  useEffect(() => {
+    if (!supabase) return;
+    
+    loadPaymentMethods();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log(`[PaymentContext] Auth state changed: ${event}`);
+      if (event === 'SIGNED_IN') {
+        loadPaymentMethods();
+      }
+      if (event === 'SIGNED_OUT') {
+        clearAllPaymentMethods();
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, [supabase, loadPaymentMethods, clearAllPaymentMethods]);
 
   const value: PaymentContextType = {
     paymentMethods,
@@ -176,12 +202,4 @@ export const PaymentProvider: React.FC<PaymentProviderProps> = ({ children }) =>
       {children}
     </PaymentContext.Provider>
   );
-};
-
-export const usePayment = (): PaymentContextType => {
-  const context = useContext(PaymentContext);
-  if (context === undefined) {
-    throw new Error('usePayment must be used within a PaymentProvider');
-  }
-  return context;
 }; 

@@ -1,9 +1,10 @@
 import React, { useMemo } from 'react';
-import { StyleSheet, View, Text, ScrollView, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useExpenses } from '../../contexts/ExpenseContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { useRouter } from 'expo-router';
+import { handlePaymentRedirect } from '../../lib/paymentUtils';
 
 // Define structure for calculated balances (can be expanded)
 interface FriendBalance {
@@ -268,16 +269,17 @@ export default function DashboardScreen() {
     alignItems: 'center',
     paddingVertical: 12,
     borderBottomWidth: 1,
-      borderBottomColor: colors.borderColor,
-    },
+    borderBottomColor: colors.borderColor,
+    minHeight: 72, // Ensure consistent height
+  },
      balanceRowLast: { // Style to remove border for the last item
         borderBottomWidth: 0,
   },
   friendInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-      flex: 1, // Allow name to take space
-      marginRight: 8,
+    flex: 0.6, // Take 60% of the space
+    marginRight: 16, // Increased margin
   },
   avatarCircle: {
     width: 40,
@@ -286,7 +288,6 @@ export default function DashboardScreen() {
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
-      // Background color set dynamically
   },
   avatarText: {
     fontSize: 18,
@@ -296,19 +297,27 @@ export default function DashboardScreen() {
   friendName: {
     fontSize: 16,
     fontWeight: '500',
-      color: colors.textDark,
+    color: colors.textDark,
+    flex: 1, // Allow text to take remaining space
+    flexWrap: 'wrap', // Allow wrapping
   },
   balanceInfo: {
+    flex: 0.4, // Take 40% of the space
     alignItems: 'flex-end',
+    justifyContent: 'center',
   },
     balanceDescription: { // Text like "owes you" or "You owe"
         fontSize: 12,
         color: colors.textMedium,
-        marginBottom: 2,
+        marginBottom: 4,
+        textAlign: 'right',
+        flexWrap: 'wrap', // Allow wrapping
+        maxWidth: '100%', // Ensure text stays within container
     },
     balanceAmount: { // The $ amount
         fontSize: 16,
         fontWeight: 'bold',
+        textAlign: 'right',
         // Color set dynamically
   },
   categoryRow: {
@@ -391,6 +400,22 @@ export default function DashboardScreen() {
     }
   });
 
+  const handlePaymentClick = (friend: FriendBalance) => {
+    // Get the payment method from the friend's profile
+    // For now, we'll assume it's stored in the Payment field
+    // You might need to fetch this from your profiles table
+    const paymentInfo = friend.name.startsWith('$') 
+      ? { type: 'cashapp' as const, username: friend.name }
+      : { type: 'venmo' as const, username: friend.name };
+
+    // Add the amount they owe
+    if (friend.amount !== 0) {
+      paymentInfo.amount = Math.abs(friend.amount);
+    }
+
+    handlePaymentRedirect(paymentInfo);
+  };
+
   // Check if there are any expenses to display
   if (expenses.length === 0) {
        return (
@@ -453,37 +478,54 @@ export default function DashboardScreen() {
 
             {friendBalances.map((friend, index) => {
                 const isOwedToYou = friend.amount > 0;
-                const owesYouText = `${friend.name} owes you`;
-                const youOweText = `You owe ${friend.name}`;
-
+                const owesYouText = isOwedToYou ? `${friend.name} owes you` : `You owe ${friend.name}`;
                 const avatarBgColor = isOwedToYou 
                     ? 'rgba(52, 199, 89, 0.2)' 
                     : 'rgba(255, 59, 48, 0.2)';
+                const avatarTextColor = isOwedToYou ? colors.successColor : colors.dangerColor;
 
                 return (
-                    <View
+                    <TouchableOpacity
                         key={friend.name} // Use name as key assuming names are unique in this context
                         style={[
                             dynamicStyles.balanceRow,
-                            index === friendBalances.length - 1 ? dynamicStyles.balanceRowLast : null // Remove border on last item
+                            index === friendBalances.length - 1 ? dynamicStyles.balanceRowLast : null, // Remove border on last item
+                            Platform.OS === 'web' && { cursor: 'pointer' }
                         ]}
+                        onPress={() => handlePaymentClick(friend)}
                     >
                     <View style={dynamicStyles.friendInfo}>
                       <View style={[
                         dynamicStyles.avatarCircle,
                         { backgroundColor: avatarBgColor }
                       ]}>
-                        <Text style={[dynamicStyles.avatarText, {color: isOwedToYou ? colors.successColor : colors.dangerColor }]}>{friend.name.charAt(0).toUpperCase()}</Text>
+                        <Text 
+                          style={[
+                            dynamicStyles.avatarText, 
+                            { color: avatarTextColor }
+                          ]}
+                        >
+                          {friend.name.charAt(0).toUpperCase()}
+                        </Text>
                       </View>
-                      <Text style={dynamicStyles.friendName}>{friend.name}</Text>
+                      <Text 
+                        style={dynamicStyles.friendName}
+                        numberOfLines={2} // Allow up to 2 lines for long emails
+                        ellipsizeMode="tail" // Add ... if text is too long
+                      >
+                        {friend.name}
+                      </Text>
                     </View>
 
                     <View style={dynamicStyles.balanceInfo}>
-                        <Text style={[
+                        <Text 
+                          style={[
                             dynamicStyles.balanceDescription,
                              isOwedToYou ? dynamicStyles.positiveAmount : dynamicStyles.owedAmount
-                         ]}>
-                             {isOwedToYou ? owesYouText : youOweText}
+                         ]}
+                         numberOfLines={2}
+                        >
+                             {owesYouText}
                          </Text>
                       <Text style={[
                         dynamicStyles.balanceAmount,
@@ -492,7 +534,7 @@ export default function DashboardScreen() {
                         ${Math.abs(friend.amount).toFixed(2)}
                       </Text>
                     </View>
-                  </View>
+                  </TouchableOpacity>
                 );
             })}
           </View>

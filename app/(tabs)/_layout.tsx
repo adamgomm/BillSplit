@@ -11,6 +11,7 @@ export default function TabLayout() {
 
   return (
     <Tabs
+      initialRouteName="home"
       screenOptions={({ route }) => ({
         tabBarIcon: ({ focused, color, size }) => {
           let iconName: React.ComponentProps<typeof Ionicons>['name'] = 'alert-circle-outline';
@@ -43,6 +44,12 @@ export default function TabLayout() {
         },
       })}
     >
+      <Tabs.Screen
+        name="index"
+        options={{
+          href: null,
+        }}
+      />
       <Tabs.Screen
         name="home"
         options={{

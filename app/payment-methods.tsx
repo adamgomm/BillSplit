@@ -13,8 +13,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from '../contexts/ThemeContext';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { supabaseUrl, supabaseAnonKey } from '../lib/supabaseClient';
+import supabaseClient from '../lib/supabaseClient';
 
 export default function PaymentMethodsScreen() {
   const { colors } = useTheme();
@@ -23,28 +22,34 @@ export default function PaymentMethodsScreen() {
   const [selectedType, setSelectedType] = useState<'cashapp' | 'venmo'>('cashapp');
   const [username, setUsername] = useState('');
   const [loading, setLoading] = useState(false);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
   const [currentPayment, setCurrentPayment] = useState<string | null>(null);
-
-  // Initialize Supabase client
-  useEffect(() => {
-    const client = createClient(supabaseUrl, supabaseAnonKey);
-    setSupabase(client);
-  }, []);
 
   // Load current payment info
   useEffect(() => {
     loadPaymentInfo();
-  }, [supabase]);
+  }, []);
 
   const loadPaymentInfo = async () => {
-    if (!supabase) return;
-
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      // First check if we have a session
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      
+      if (sessionError) {
+        console.error("[PaymentMethodsScreen] Session error:", sessionError);
+        throw new Error('Session error');
+      }
 
-      const { data, error } = await supabase
+      if (!session) {
+        console.error("[PaymentMethodsScreen] No active session");
+        router.replace('/login');
+        return;
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError) throw userError;
+      if (!user) throw new Error('User not found');
+
+      const { data, error } = await supabaseClient
         .from('profiles')
         .select('Payment')
         .eq('id', user.id)
@@ -59,8 +64,13 @@ export default function PaymentMethodsScreen() {
         setSelectedType(data.Payment.startsWith('$') ? 'cashapp' : 'venmo');
       }
     } catch (error) {
-      console.error('Error loading payment info:', error);
-      Alert.alert('Error', 'Failed to load payment information');
+      console.error('[PaymentMethodsScreen] Error loading payment info:', error);
+      if (error.message?.includes('auth') || error.message?.includes('session')) {
+        Alert.alert('Session Expired', 'Please log in again.');
+        router.replace('/login');
+      } else {
+        Alert.alert('Error', 'Failed to load payment information');
+      }
     }
   };
 
@@ -69,12 +79,6 @@ export default function PaymentMethodsScreen() {
       type: selectedType,
       username: username
     });
-
-    if (!supabase) {
-      console.error('[PaymentMethodsScreen] Supabase client not initialized');
-      Alert.alert('Error', 'Connection not ready');
-      return;
-    }
 
     if (!username.trim()) {
       console.log('[PaymentMethodsScreen] Username is empty');
@@ -98,15 +102,19 @@ export default function PaymentMethodsScreen() {
     setLoading(true);
 
     try {
-      console.log('[PaymentMethodsScreen] Getting current user');
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        console.error('[PaymentMethodsScreen] No authenticated user found');
+      // Check session first
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError || !session) {
+        throw new Error('Session expired');
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError || !user) {
         throw new Error('Not authenticated');
       }
 
       console.log('[PaymentMethodsScreen] Updating profile with payment:', username.trim());
-      const { error: updateError } = await supabase
+      const { error: updateError } = await supabaseClient
         .from('profiles')
         .update({ Payment: username.trim() })
         .eq('id', user.id);
@@ -122,20 +130,33 @@ export default function PaymentMethodsScreen() {
       Alert.alert('Success', 'Payment information updated');
     } catch (error) {
       console.error('[PaymentMethodsScreen] Error saving payment info:', error);
-      Alert.alert('Error', 'Failed to save payment information');
+      if (error.message?.includes('auth') || error.message?.includes('session')) {
+        Alert.alert('Session Expired', 'Please log in again.');
+        router.replace('/login');
+      } else {
+        Alert.alert('Error', 'Failed to save payment information');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const removePaymentMethod = async () => {
-    if (!supabase || !currentPayment) return;
+    if (!currentPayment) return;
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      // Check session first
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError || !session) {
+        throw new Error('Session expired');
+      }
 
-      const { error } = await supabase
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError || !user) {
+        throw new Error('Not authenticated');
+      }
+
+      const { error } = await supabaseClient
         .from('profiles')
         .update({ Payment: null })
         .eq('id', user.id);
@@ -145,8 +166,13 @@ export default function PaymentMethodsScreen() {
       setCurrentPayment(null);
       Alert.alert('Success', 'Payment information removed');
     } catch (error) {
-      console.error('Error removing payment info:', error);
-      Alert.alert('Error', 'Failed to remove payment information');
+      console.error('[PaymentMethodsScreen] Error removing payment info:', error);
+      if (error.message?.includes('auth') || error.message?.includes('session')) {
+        Alert.alert('Session Expired', 'Please log in again.');
+        router.replace('/login');
+      } else {
+        Alert.alert('Error', 'Failed to remove payment information');
+      }
     }
   };
 
@@ -447,112 +473,112 @@ export default function PaymentMethodsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  content: {
-    flex: 1,
-    padding: 16,
-  },
-  section: {
-    borderRadius: 12,
+    container: {
+      flex: 1,
+    },
+    content: {
+      flex: 1,
+      padding: 16,
+    },
+    section: {
+      borderRadius: 12,
     padding: 20,
-    marginBottom: 16,
+      marginBottom: 16,
     backgroundColor: '#FFFFFF',
     ...Platform.select({
       ios: {
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.1,
+      shadowRadius: 4,
       },
       android: {
-        elevation: 3,
+      elevation: 3,
       },
       web: {
         boxShadow: '0px 2px 4px rgba(0, 0, 0, 0.1)',
       }
     }),
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 16,
-  },
-  paymentMethodCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    },
+    sectionTitle: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      marginBottom: 16,
+    },
+    paymentMethodCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
     padding: 16,
     backgroundColor: '#F8F8F8',
-    borderRadius: 8,
+      borderRadius: 8,
     marginBottom: 12,
-  },
-  paymentMethodIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  cashAppIcon: {
-    backgroundColor: '#00C853',
-  },
-  venmoIcon: {
-    backgroundColor: '#3D95CE',
-  },
-  paymentMethodInfo: {
-    flex: 1,
-  },
-  paymentMethodName: {
-    fontSize: 16,
-    fontWeight: '600',
+    },
+    paymentMethodIcon: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginRight: 12,
+    },
+    cashAppIcon: {
+      backgroundColor: '#00C853',
+    },
+    venmoIcon: {
+      backgroundColor: '#3D95CE',
+    },
+    paymentMethodInfo: {
+      flex: 1,
+    },
+    paymentMethodName: {
+      fontSize: 16,
+      fontWeight: '600',
     color: '#333',
-    marginBottom: 2,
-  },
-  paymentMethodUsername: {
-    fontSize: 14,
+      marginBottom: 2,
+    },
+    paymentMethodUsername: {
+      fontSize: 14,
     color: '#666',
-  },
-  removeButton: {
-    padding: 8,
-  },
-  addButton: {
-    borderRadius: 8,
-    padding: 16,
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  addButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  emptyState: {
-    alignItems: 'center',
-    padding: 32,
-  },
-  emptyStateText: {
-    fontSize: 16,
-    textAlign: 'center',
-    marginTop: 12,
-  },
-  modalOverlay: {
+    },
+    removeButton: {
+      padding: 8,
+    },
+    addButton: {
+      borderRadius: 8,
+      padding: 16,
+      alignItems: 'center',
+      marginTop: 16,
+    },
+    addButtonText: {
+      color: '#FFFFFF',
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    emptyState: {
+      alignItems: 'center',
+      padding: 32,
+    },
+    emptyStateText: {
+      fontSize: 16,
+      textAlign: 'center',
+      marginTop: 12,
+    },
+    modalOverlay: {
     position: 'fixed',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      justifyContent: 'center',
+      alignItems: 'center',
     zIndex: 1000,
-  },
-  modalContainer: {
+    },
+    modalContainer: {
     width: '90%',
     maxWidth: 400,
-    borderRadius: 12,
-    padding: 24,
+      borderRadius: 12,
+      padding: 24,
     ...Platform.select({
       web: {
         outlineStyle: 'none',
@@ -566,74 +592,74 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 20,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  typeSelector: {
-    flexDirection: 'row',
-    marginBottom: 20,
-  },
-  typeOption: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    borderRadius: 8,
-    marginHorizontal: 4,
-    borderWidth: 2,
-  },
-  typeOptionSelected: {
+    },
+    modalTitle: {
+      fontSize: 20,
+      fontWeight: 'bold',
+      marginBottom: 20,
+      textAlign: 'center',
+    },
+    typeSelector: {
+      flexDirection: 'row',
+      marginBottom: 20,
+    },
+    typeOption: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      padding: 12,
+      borderRadius: 8,
+      marginHorizontal: 4,
+      borderWidth: 2,
+    },
+    typeOptionSelected: {
     borderColor: '#5D3FD3',
     backgroundColor: '#5D3FD320',
-  },
-  typeOptionText: {
-    marginLeft: 8,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  inputContainer: {
-    marginBottom: 16,
-  },
-  inputLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  textInput: {
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-  },
-  modalButtons: {
-    flexDirection: 'row',
-    marginTop: 20,
-  },
-  modalButton: {
-    flex: 1,
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginHorizontal: 4,
-  },
-  cancelButton: {
+    },
+    typeOptionText: {
+      marginLeft: 8,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    inputContainer: {
+      marginBottom: 16,
+    },
+    inputLabel: {
+      fontSize: 16,
+      fontWeight: '600',
+      marginBottom: 8,
+    },
+    textInput: {
+      borderWidth: 1,
+      borderRadius: 8,
+      padding: 12,
+      fontSize: 16,
+    },
+    modalButtons: {
+      flexDirection: 'row',
+      marginTop: 20,
+    },
+    modalButton: {
+      flex: 1,
+      padding: 12,
+      borderRadius: 8,
+      alignItems: 'center',
+      marginHorizontal: 4,
+    },
+    cancelButton: {
     backgroundColor: '#E0E0E0',
-  },
-  saveButton: {
+    },
+    saveButton: {
     backgroundColor: '#5D3FD3',
-  },
-  modalButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  cancelButtonText: {
+    },
+    modalButtonText: {
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    cancelButtonText: {
     color: '#333',
-  },
-  saveButtonText: {
-    color: '#FFFFFF',
-  },
-}); 
+    },
+    saveButtonText: {
+      color: '#FFFFFF',
+    },
+  });

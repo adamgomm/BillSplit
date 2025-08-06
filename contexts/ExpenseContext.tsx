@@ -1,7 +1,8 @@
 import React, { createContext, useState, useContext, ReactNode, useCallback, useEffect } from 'react';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { supabaseUrl, supabaseAnonKey, supabaseAuthConfig } from '../lib/supabaseClient';
+import { AuthError } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import supabaseClient from '../lib/supabaseClient';
+import { router } from 'expo-router';
 
 // Define the Expense type (ensure consistency across the app)
 interface Expense {
@@ -19,6 +20,7 @@ interface ExpenseContextType {
   addNewExpense: (newExpense: Omit<Expense, 'id'>) => Promise<void>;
   deleteExpense: (idToDelete: string) => Promise<void>;
   clearAllExpenses: () => void;
+  refreshExpenses: () => Promise<void>;
   loading: boolean;
   error: string | null;
 }
@@ -65,55 +67,62 @@ export const ExpenseProvider: React.FC<ExpenseProviderProps> = ({ children }) =>
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
-
-  // Initialize Supabase client
-  useEffect(() => {
-    const client = createClient(supabaseUrl, supabaseAnonKey, {
-      auth: {
-        storage: AsyncStorage,
-        autoRefreshToken: true,
-        persistSession: true,
-        detectSessionInUrl: false,
-      },
-    });
-    setSupabase(client);
-    console.log('[ExpenseContext] Supabase client initialized.');
-  }, []);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   // Function to clear all expenses from state
   const clearAllExpenses = useCallback(() => {
     console.log('[ExpenseContext] Clearing all expenses from state.');
     setExpenses([]);
     setError(null);
+    setCurrentUserId(null);
   }, []);
   
   // Function to fetch expenses from Supabase
-  const fetchExpenses = useCallback(async () => {
-    if (!supabase) return;
-
+  const fetchExpenses = useCallback(async (forceRefresh = false) => {
     console.log('[ExpenseContext] Attempting to fetch expenses...');
     setLoading(true);
     setError(null);
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        console.log('[ExpenseContext] No user session found. Clearing expenses.');
+      // Clear existing expenses before fetching new ones
+      setExpenses([]);
+      
+      // Check session first
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError) throw sessionError;
+      
+      if (!session) {
+        console.log('[ExpenseContext] No session found. Clearing expenses.');
         clearAllExpenses();
+        router.replace('/login');
+        return;
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError) throw userError;
+      if (!user) {
+        console.log('[ExpenseContext] No user found. Clearing expenses.');
+        clearAllExpenses();
+        router.replace('/login');
+        return;
+      }
+
+      // If we're already showing expenses for this user and not forcing refresh, don't reload
+      if (!forceRefresh && currentUserId === user.id) {
+        console.log('[ExpenseContext] Already showing expenses for current user:', user.id);
         setLoading(false);
         return;
       }
 
-      const { data, error: fetchError } = await supabase
+      console.log('[ExpenseContext] Fetching expenses for user:', user.id, 'Previous user:', currentUserId);
+
+      const { data, error: fetchError } = await supabaseClient
         .from('expenses')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
-      if (fetchError) {
-        throw fetchError;
-      }
+      if (fetchError) throw fetchError;
 
       const transformedExpenses = data?.map(expense => ({
         id: expense.id.toString(),
@@ -124,60 +133,99 @@ export const ExpenseProvider: React.FC<ExpenseProviderProps> = ({ children }) =>
         splitWith: expense.split_with || []
       })) || [];
 
+      setCurrentUserId(user.id);
       setExpenses(transformedExpenses);
       console.log('[ExpenseContext] Expenses fetched successfully for user:', user.id, 'Count:', transformedExpenses.length);
     } catch (err: any) {
       console.error('[ExpenseContext] Error fetching expenses:', err);
+      if (err instanceof AuthError || err.message?.includes('auth') || err.message?.includes('session')) {
+        console.log('[ExpenseContext] Auth error detected, redirecting to login');
+        clearAllExpenses();
+        router.replace('/login');
+      }
       setError(err.message || 'Failed to fetch expenses');
     } finally {
       setLoading(false);
     }
-  }, [supabase, clearAllExpenses]);
+  }, [clearAllExpenses, currentUserId]);
   
-  // Listen to auth state changes to fetch/clear data automatically
+  // Public refresh function
+  const refreshExpenses = useCallback(async () => {
+    console.log('[ExpenseContext] Manual refresh requested');
+    await fetchExpenses(true);
+  }, [fetchExpenses]);
+  
+  // Listen to auth state changes
   useEffect(() => {
-    if (!supabase) return;
-
-    // Fetch initial data on load
-    fetchExpenses();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log(`[ExpenseContext] Auth state changed: ${event}`);
+    // Set up auth state change listener
+    const { data: authListener } = supabaseClient.auth.onAuthStateChange(async (event, session) => {
+      console.log(`[ExpenseContext] Auth state changed: ${event}, current user: ${currentUserId}, session user: ${session?.user.id}`);
+      
       if (event === 'SIGNED_IN') {
-        fetchExpenses();
-      }
-      if (event === 'SIGNED_OUT') {
+        // Always force a refresh on sign in
+        console.log('[ExpenseContext] New sign in detected, forcing expense refresh');
+        await fetchExpenses(true);
+      } else if (event === 'SIGNED_OUT') {
+        console.log('[ExpenseContext] User signed out, clearing expenses');
         clearAllExpenses();
+      } else if (event === 'USER_DELETED' || event === 'USER_UPDATED') {
+        console.log('[ExpenseContext] User updated/deleted, refreshing expenses');
+        await fetchExpenses(true);
+      } else if (event === 'INITIAL_SESSION' && session) {
+        // Handle case where session already exists on initialization
+        console.log('[ExpenseContext] Initial session detected, fetching expenses');
+        await fetchExpenses(true);
+      } else if (event === 'TOKEN_REFRESHED' && session) {
+        // Handle token refresh which might happen during login
+        console.log('[ExpenseContext] Token refreshed, checking if user changed');
+        if (session.user.id !== currentUserId) {
+          console.log('[ExpenseContext] User changed after token refresh, fetching expenses');
+          await fetchExpenses(true);
+        }
       }
     });
 
+    // Initial fetch - this will handle cases where auth is already established
+    const checkInitialAuth = async () => {
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      if (session) {
+        console.log('[ExpenseContext] Initial auth check: session found, fetching expenses');
+        await fetchExpenses(true);
+      } else {
+        console.log('[ExpenseContext] Initial auth check: no session found');
+      }
+    };
+    
+    checkInitialAuth();
+
     return () => {
-      // Cleanup the listener on component unmount
+      console.log('[ExpenseContext] Cleaning up auth listener');
       authListener.subscription.unsubscribe();
     };
-  }, [supabase, fetchExpenses, clearAllExpenses]);
+  }, [fetchExpenses, clearAllExpenses]);
 
   // Function to add a new expense
   const addNewExpense = useCallback(async (newExpenseData: Omit<Expense, 'id'>) => {
-    if (!supabase) {
-      setError('Supabase client not initialized');
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
 
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser();
+      // Check session first
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError) throw sessionError;
+      
+      if (!session) {
+        throw new Error('No active session');
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError) throw userError;
       if (!user) {
         throw new Error('User not authenticated');
       }
 
-      console.log('[ExpenseContext] User authenticated:', user.id);
-      console.log('[ExpenseContext] Raw expense data:', newExpenseData);
+      console.log('[ExpenseContext] Adding expense for user:', user.id);
 
-      // Prepare the data to insert
       const insertData = {
         title: newExpenseData.title,
         amount: newExpenseData.amount,
@@ -188,27 +236,14 @@ export const ExpenseProvider: React.FC<ExpenseProviderProps> = ({ children }) =>
         created_at: new Date().toISOString()
       };
 
-      console.log('[ExpenseContext] Data to insert:', insertData);
-
-      // Insert into Supabase
-      const { data, error: insertError } = await supabase
+      const { data, error: insertError } = await supabaseClient
         .from('expenses')
         .insert(insertData)
         .select()
         .single();
 
-      if (insertError) {
-        console.error('[ExpenseContext] Insert error details:', insertError);
-        console.error('[ExpenseContext] Error code:', insertError.code);
-        console.error('[ExpenseContext] Error message:', insertError.message);
-        console.error('[ExpenseContext] Error details:', insertError.details);
-        console.error('[ExpenseContext] Error hint:', insertError.hint);
-        throw insertError;
-      }
+      if (insertError) throw insertError;
 
-      console.log('[ExpenseContext] Insert successful, returned data:', data);
-
-      // Transform the returned data to match our Expense interface
       const newExpense: Expense = {
         id: data.id.toString(),
         title: data.title,
@@ -218,65 +253,68 @@ export const ExpenseProvider: React.FC<ExpenseProviderProps> = ({ children }) =>
         splitWith: data.split_with || []
       };
 
-      // Update local state
       setExpenses(prevExpenses => [newExpense, ...prevExpenses]);
-      console.log('[ExpenseContext] Expense added successfully:', newExpense);
+      console.log('[ExpenseContext] Expense added successfully:', newExpense.id);
     } catch (err: any) {
       console.error('[ExpenseContext] Error adding expense:', err);
-      console.error('[ExpenseContext] Full error object:', JSON.stringify(err, null, 2));
+      if (err instanceof AuthError || err.message?.includes('auth') || err.message?.includes('session')) {
+        router.replace('/login');
+      }
       setError(err.message || 'Failed to add expense');
-      throw err; // Re-throw to allow UI to handle the error
+      throw err;
     } finally {
       setLoading(false);
     }
-  }, [supabase]);
+  }, []);
 
   // Function to delete an expense
   const deleteExpense = useCallback(async (idToDelete: string) => {
-    if (!supabase) {
-      setError('Supabase client not initialized');
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
 
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser();
+      // Check session first
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      if (sessionError) throw sessionError;
+      
+      if (!session) {
+        throw new Error('No active session');
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError) throw userError;
       if (!user) {
         throw new Error('User not authenticated');
       }
 
-      // Delete from Supabase
-      const { error: deleteError } = await supabase
+      const { error: deleteError } = await supabaseClient
         .from('expenses')
         .delete()
         .eq('id', idToDelete)
-        .eq('user_id', user.id); // Ensure user can only delete their own expenses
+        .eq('user_id', user.id);
 
-      if (deleteError) {
-        throw deleteError;
-      }
+      if (deleteError) throw deleteError;
 
-      // Update local state
       setExpenses(prevExpenses => prevExpenses.filter(expense => expense.id !== idToDelete));
       console.log('[ExpenseContext] Expense deleted successfully:', idToDelete);
     } catch (err: any) {
       console.error('[ExpenseContext] Error deleting expense:', err);
+      if (err instanceof AuthError || err.message?.includes('auth') || err.message?.includes('session')) {
+        router.replace('/login');
+      }
       setError(err.message || 'Failed to delete expense');
-      throw err; // Re-throw to allow UI to handle the error
+      throw err;
     } finally {
       setLoading(false);
     }
-  }, [supabase]);
+  }, []);
 
-  // Value provided by the context
   const value = {
     expenses,
     addNewExpense,
     deleteExpense,
     clearAllExpenses,
+    refreshExpenses,
     loading,
     error,
   };

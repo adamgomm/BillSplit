@@ -5,6 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // Import createClient and config, not the client itself
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { supabaseUrl, supabaseAnonKey } from '../lib/supabaseClient';
+import { useExpenses } from '../contexts/ExpenseContext';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -15,6 +16,8 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   // State to hold the initialized client
   const [supabaseClient, setSupabaseClient] = useState<SupabaseClient | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false); // Add flag to prevent double redirects
+  const { refreshExpenses } = useExpenses();
 
   // Add refs for TextInput components
   const passwordRef = useRef<TextInput>(null);
@@ -38,27 +41,29 @@ export default function LoginScreen() {
       setSupabaseClient(client);
       console.log('[LoginScreen] Supabase client initialized.');
 
-      // Check for an existing session
-      const { data: { session } } = await client.auth.getSession();
-      const userToken = await AsyncStorage.getItem('userToken');
-      
-      if (session && userToken) {
-        console.log('[LoginScreen] Active session found, redirecting to app...');
-        router.replace('/(tabs)/home');
-      } else {
-        // Clear any lingering data if we're on the login screen without a valid session
-        console.log('[LoginScreen] No active session. Clearing any lingering data...');
-        await AsyncStorage.clear();
-        setIsSignUp(false);
-        setEmail('');
-        setPassword('');
-        setUsername('');
-        setConfirmPassword('');
+      // Only check for existing session if we're not in the middle of logging in
+      if (!isLoggingIn) {
+        const { data: { session } } = await client.auth.getSession();
+        const userToken = await AsyncStorage.getItem('userToken');
+        
+        if (session && userToken) {
+          console.log('[LoginScreen] Active session found, redirecting to tabs...');
+          router.replace('/(tabs)');
+        } else {
+          // Clear any lingering data if we're on the login screen without a valid session
+          console.log('[LoginScreen] No active session. Clearing any lingering data...');
+          await AsyncStorage.clear();
+          setIsSignUp(false);
+          setEmail('');
+          setPassword('');
+          setUsername('');
+          setConfirmPassword('');
+        }
       }
     };
     
     initializeAndCheckSession();
-  }, []);
+  }, [isLoggingIn]);
 
   // --- Handle Login ---
   const handleLogin = async () => {
@@ -70,77 +75,54 @@ export default function LoginScreen() {
       Alert.alert('Error', 'Please enter your email/username and password');
       return;
     }
-    setLoading(true);
-    let userEmailToLogin = email;
-
     try {
-      // Clear any existing data before login
-      console.log('[LoginScreen] Clearing storage before login');
+      setLoading(true);
+      setIsLoggingIn(true); // Set flag to prevent session check redirect
+      
+      // Clear any existing data first
+      console.log('[LoginScreen] Clearing existing data...');
       await AsyncStorage.clear();
+      
+      // Reset Supabase client's internal state
+      console.log('[LoginScreen] Resetting Supabase client...');
+      await supabaseClient.auth.initialize();
 
-      if (!email.includes('@')) {
-        console.log(`Login attempt with username: ${email}`);
-        const { data: profileData, error: profileError } = await supabaseClient
-          .from('profiles')
-          .select('email')
-          .eq('username', email)
-          .single();
-
-        if (profileError || !profileData) {
-          console.error('Error fetching profile by username or profile not found:', profileError);
-          Alert.alert('Login Failed', 'Invalid username or password.');
-          setLoading(false);
-          return;
-        }
-        userEmailToLogin = profileData.email;
-        console.log(`Found email ${userEmailToLogin} for username ${email}`);
-      } else {
-        console.log(`Login attempt with email: ${email}`);
-      }
-
-      const { data, error: authError } = await supabaseClient.auth.signInWithPassword({
-        email: userEmailToLogin,
+      console.log('[LoginScreen] Attempting login...');
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
+        email: email.trim(),
         password: password,
       });
 
-      if (authError) throw authError;
+      if (error) throw error;
 
-      if (data.session && data.user) {
-        console.log(`[LoginScreen] Login successful for user: ${data.user.id}`);
-        
-        // Store session data
-        await AsyncStorage.setItem('userToken', data.session.access_token);
-        await AsyncStorage.setItem('userEmail', data.user.email || userEmailToLogin);
-        await AsyncStorage.setItem('userId', data.user.id); // Store user ID for context isolation
+      // Store new user data
+      await AsyncStorage.setItem('userToken', data.session.access_token);
+      await AsyncStorage.setItem('userEmail', data.user.email || email);
+      await AsyncStorage.setItem('userId', data.user.id);
 
-        const { data: userProfile, error: fetchProfileError } = await supabaseClient
-          .from('profiles')
-          .select('username')
-          .eq('id', data.user.id)
-          .single();
+      // Note: ExpenseContext will automatically refresh on auth state change
+      console.log('[LoginScreen] User data stored, auth context will handle expense refresh');
 
-        if (fetchProfileError) {
-          console.error('Error fetching username after login:', fetchProfileError);
-        } else if (userProfile && userProfile.username) {
-          await AsyncStorage.setItem('username', userProfile.username);
-        } else {
-          if(!email.includes('@')) {
-            await AsyncStorage.setItem('username', email); 
-          }
+      // Add a small delay to ensure everything is ready
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      console.log('[LoginScreen] Login successful, navigating to tabs...');
+      router.replace('/(tabs)');
+
+      // Trigger expense refresh after navigation with a small delay
+      setTimeout(async () => {
+        try {
+          console.log('[LoginScreen] Triggering expense refresh after navigation...');
+          await refreshExpenses();
+        } catch (error) {
+          console.error('[LoginScreen] Error refreshing expenses after login:', error);
         }
+      }, 500);
 
-        console.log('[LoginScreen] User data stored, navigating to app');
-        
-        // Clear form data
-        setEmail('');
-        setPassword('');
-        setUsername('');
-        setConfirmPassword('');
-      }
-      router.replace('/(tabs)/home');
-    } catch (error: any) {
-      console.error('Login error:', error.message);
-      Alert.alert('Login Failed', 'Invalid email/username or password.');
+    } catch (err: any) {
+      console.error('[LoginScreen] Login error:', err);
+      Alert.alert('Login Failed', err.message);
+      setIsLoggingIn(false); // Reset flag on error
     } finally {
       setLoading(false);
     }
@@ -148,7 +130,7 @@ export default function LoginScreen() {
 
   // --- Handle Sign Up ---
   const handleSignUp = async () => {
-    if (!supabaseClient) { // Check if client is ready
+    if (!supabaseClient) {
       Alert.alert("Error", "Supabase client not initialized yet.");
       return;
     }
@@ -161,6 +143,7 @@ export default function LoginScreen() {
       return;
     }
     setLoading(true);
+    setIsLoggingIn(true); // Set flag to prevent session check redirect
     console.log('Signing up with email:', email, 'and username:', username);
     
     try {
@@ -168,7 +151,6 @@ export default function LoginScreen() {
       console.log('[LoginScreen] Clearing storage before signup');
       await AsyncStorage.clear();
 
-      // Use client from state
       const { data, error } = await supabaseClient.auth.signUp({
         email: email,
         password: password,
@@ -193,11 +175,15 @@ export default function LoginScreen() {
         await AsyncStorage.setItem('userToken', data.session.access_token);
         await AsyncStorage.setItem('userEmail', data.user.email || email);
         await AsyncStorage.setItem('username', username);
-        await AsyncStorage.setItem('userId', data.user.id); // Store user ID for context isolation
+        await AsyncStorage.setItem('userId', data.user.id);
 
-        console.log('[LoginScreen] New user data stored, navigating to app');
-        
-        Alert.alert('Sign Up Successful', 'Account created and logged in.');
+        // Note: ExpenseContext will automatically refresh on auth state change
+        console.log('[LoginScreen] Signup data stored, auth context will handle expense refresh');
+
+        // Add a small delay to ensure everything is ready
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        console.log('[LoginScreen] New user data stored, navigating to tabs...');
         
         // Clear form data
         setEmail('');
@@ -205,19 +191,39 @@ export default function LoginScreen() {
         setUsername('');
         setConfirmPassword('');
         
-        router.replace('/(tabs)/home');
+        Alert.alert('Sign Up Successful', 'Account created and logged in.', [
+          {
+            text: 'OK',
+            onPress: () => {
+              router.replace('/(tabs)');
+              
+              // Trigger expense refresh after navigation
+              setTimeout(async () => {
+                try {
+                  console.log('[LoginScreen] Triggering expense refresh after signup navigation...');
+                  await refreshExpenses();
+                } catch (error) {
+                  console.error('[LoginScreen] Error refreshing expenses after signup:', error);
+                }
+              }, 500);
+            }
+          }
+        ]);
       } else if (data.user && !data.session) {
         Alert.alert('Sign Up Successful', 'Please check your email to confirm your account. Username will be set upon confirmation if your setup supports it.');
         setIsSignUp(false);
         setPassword('');
         setConfirmPassword('');
+        setIsLoggingIn(false); // Reset flag
       } else {
-         Alert.alert('Sign Up', 'Sign up process completed, but session status unclear. Please try logging in.');
-         setIsSignUp(false);
+        Alert.alert('Sign Up', 'Sign up process completed, but session status unclear. Please try logging in.');
+        setIsSignUp(false);
+        setIsLoggingIn(false); // Reset flag
       }
     } catch (error: any) {
       console.error('Sign up error:', error);
       Alert.alert('Sign Up Failed', error.message || 'An unexpected error occurred.');
+      setIsLoggingIn(false); // Reset flag on error
     } finally {
       setLoading(false);
     }

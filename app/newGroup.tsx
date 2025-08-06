@@ -3,8 +3,8 @@ import { StyleSheet, View, Text, TextInput, TouchableOpacity, ScrollView, Platfo
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, router } from 'expo-router';
 import { Stack } from 'expo-router';
-import { createClient, SupabaseClient, AuthError, PostgrestError } from '@supabase/supabase-js';
-import { supabaseUrl, supabaseAnonKey } from '../lib/supabaseClient';
+import { AuthError, PostgrestError } from '@supabase/supabase-js';
+import supabaseClient from '../lib/supabaseClient';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 
 // Define a type for the user profile data from Supabase
@@ -49,19 +49,9 @@ export default function NewGroupScreen() {
   const [error, setError] = useState<string | null>(null);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
 
-  // Initialize Supabase Client
-  useEffect(() => {
-    const client = createClient(supabaseUrl, supabaseAnonKey);
-    setSupabase(client);
-    console.log('[NewGroupScreen] Supabase client initialized.');
-  }, []);
-
-  // Fetch Users with improved error handling
+  // Fetch Users with improved session handling
   const fetchUsers = async () => {
-    if (!supabase) return;
-
     if (Platform.OS === 'android' && !isConnected) {
       Alert.alert(
         "Network Error",
@@ -77,17 +67,30 @@ export default function NewGroupScreen() {
     setError(null);
 
     try {
+      // First check if we have a session
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      
+      if (sessionError) {
+        console.error("[NewGroupScreen] Session error:", sessionError);
+        throw new Error('Session error');
+      }
+
+      if (!session) {
+        console.error("[NewGroupScreen] No active session");
+        throw new Error('Auth session missing!');
+      }
+
       const timeoutPromise = new Promise<never>((_, reject) => 
         setTimeout(() => reject(new Error('Request timeout')), 15000)
       );
 
-      const authResponse = await Promise.race([
-        supabase.auth.getUser(),
+      const { data: { user }, error: userError } = await Promise.race([
+        supabaseClient.auth.getUser(),
         timeoutPromise
-      ]) as AuthResponse;
+      ]);
 
-      if (authResponse.error) throw authResponse.error;
-      const user = authResponse.data.user;
+      if (userError) throw userError;
+      if (!user) throw new Error('User not found');
 
       if (user?.email) {
         setCurrentUserEmail(user.email);
@@ -95,7 +98,7 @@ export default function NewGroupScreen() {
       }
 
       const profilesResponse = await Promise.race([
-        supabase.from('profiles').select('id, email'),
+        supabaseClient.from('profiles').select('id, email'),
         timeoutPromise
       ]) as ProfilesResponse;
 
@@ -122,9 +125,12 @@ export default function NewGroupScreen() {
         errorMessage = "No internet connection. Please check your network.";
       } else if (err.message?.includes('timeout')) {
         errorMessage = "Request timed out. Please check your connection and try again.";
-      } else if (err.message?.includes('auth')) {
+      } else if (err.message?.includes('auth') || err.message?.includes('session')) {
         errorMessage = "Session expired. Please log in again.";
-        router.replace('/login');
+        // Navigate to login with a small delay to allow the alert to be seen
+        setTimeout(() => {
+          router.replace('/login');
+        }, 1500);
       }
 
       Alert.alert("Error", errorMessage);
@@ -135,12 +141,10 @@ export default function NewGroupScreen() {
     }
   };
 
-  // Fetch users when Supabase client is ready
+  // Fetch users on mount
   useEffect(() => {
-    if (supabase) {
-      fetchUsers();
-    }
-  }, [supabase]);
+    fetchUsers();
+  }, []);
 
   // --- Filter Users Based on Search Query ---
   useEffect(() => {
@@ -251,8 +255,8 @@ export default function NewGroupScreen() {
           <Text style={styles.headerTitle}>Create Group</Text>
           <TouchableOpacity 
             onPress={handleCreateGroup}
-            disabled={!supabase || loading}
-            style={{ opacity: (!supabase || loading) ? 0.6 : 1 }}
+            disabled={!supabaseClient || loading}
+            style={{ opacity: (!supabaseClient || loading) ? 0.6 : 1 }}
           >
             {loading ? (
               <ActivityIndicator size="small" color="#5D3FD3" />
@@ -408,7 +412,7 @@ export default function NewGroupScreen() {
               </View>
             )}
 
-            {!supabase && !loading && !error && (
+            {!supabaseClient && !loading && !error && (
               <View style={styles.errorContainer}>
                 <Ionicons name="alert-circle-outline" size={24} color="#FF3B30" />
                 <Text style={styles.errorText}>Connection error. Please try again.</Text>

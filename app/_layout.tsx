@@ -24,10 +24,14 @@ export default function RootLayout() {
   const colorScheme = useColorScheme();
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(true);
+  const [shouldCheckAuth, setShouldCheckAuth] = useState(true);
 
   useEffect(() => {
-    checkAuthState();
-  }, []);
+    // Only check auth state on initial load, not during navigation
+    if (shouldCheckAuth) {
+      checkAuthState();
+    }
+  }, [shouldCheckAuth]);
 
   const checkAuthState = async () => {
     try {
@@ -45,16 +49,19 @@ export default function RootLayout() {
       const userToken = await AsyncStorage.getItem('userToken');
 
       if (!session || !userToken) {
-        // No valid session, redirect to index (login) screen
+        // No valid session, redirect to login screen
         console.log('[RootLayout] No valid session found, redirecting to login...');
-        router.replace('/');
+        router.replace('/login');
+      } else {
+        console.log('[RootLayout] Valid session found, staying on current route...');
       }
     } catch (error) {
       console.error('[RootLayout] Error checking auth state:', error);
       // On error, safely redirect to login
-      router.replace('/');
+      router.replace('/login');
     } finally {
       setIsLoading(false);
+      setShouldCheckAuth(false); // Prevent further automatic checks
     }
   };
 

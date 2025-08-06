@@ -1,83 +1,77 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Image, ScrollView, Switch, Alert, Platform } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform, ScrollView } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router } from 'expo-router';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { supabaseUrl, supabaseAnonKey } from '../../lib/supabaseClient';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import supabaseClient from '../../lib/supabaseClient';
+import { useExpenses } from '../../contexts/ExpenseContext';
 
 export default function ProfileScreen() {
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const router = useRouter();
+  const [email, setEmail] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
-  const [darkModeEnabled, setDarkModeEnabled] = useState(false);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { clearAllExpenses } = useExpenses();
 
   useEffect(() => {
-    const client = createClient(supabaseUrl, supabaseAnonKey);
-    setSupabase(client);
+    loadUserInfo();
   }, []);
 
-  useEffect(() => {
-    // Load the user email from AsyncStorage
-    const loadUserData = async () => {
-      try {
-        const email = await AsyncStorage.getItem('userEmail');
-        const storedUsername = await AsyncStorage.getItem('username');
-        console.log('[ProfileScreen] Email loaded from AsyncStorage:', email);
-        console.log('[ProfileScreen] Username loaded from AsyncStorage:', storedUsername);
-        setUserEmail(email);
-        setUsername(storedUsername);
-      } catch (e) {
-        console.error('Failed to load user data:', e);
-      }
-    };
-
-    loadUserData();
-  }, []);
+  const loadUserInfo = async () => {
+    try {
+      const email = await AsyncStorage.getItem('userEmail');
+      const storedUsername = await AsyncStorage.getItem('username');
+      console.log('[ProfileScreen] Email loaded from AsyncStorage:', email);
+      console.log('[ProfileScreen] Username loaded from AsyncStorage:', storedUsername);
+      setEmail(email);
+      setUsername(storedUsername);
+    } catch (error) {
+      console.error('[ProfileScreen] Error loading user info:', error);
+    }
+  };
 
   const handleLogout = async () => {
-    console.log('[ProfileScreen] handleLogout called');
-    if (!supabase) {
-      console.error('[ProfileScreen] Supabase client not ready for logout.');
-      // Attempt a fallback logout
-      try {
-      await AsyncStorage.clear();
-      router.replace('/login');
-      } catch (e) {
-        console.error('[ProfileScreen] Error in fallback logout:', e);
-        Alert.alert('Error', 'Failed to logout. Please try again.');
-      }
-      return;
-    }
-    
     try {
-      setLoading(true);
+      console.log('[ProfileScreen] Starting logout process...');
       
-      // 1. Sign out from Supabase first
-      console.log('[ProfileScreen] Signing out from Supabase...');
-      const { error } = await supabase.auth.signOut();
-      if (error) {
-        console.error('[ProfileScreen] Error signing out from Supabase:', error);
-        throw error;
-      }
-      
-      // 2. Clear all local data
+      // First, sign out from Supabase
+      const { error } = await supabaseClient.auth.signOut();
+      if (error) throw error;
+
+      // Clear all AsyncStorage
       console.log('[ProfileScreen] Clearing AsyncStorage...');
       await AsyncStorage.clear();
       console.log('[ProfileScreen] AsyncStorage cleared completely.');
-      
-      // 3. Force a navigation reset to the login screen
-      console.log('[ProfileScreen] Forcing navigation to login screen...');
+
+      // Clear expenses from context
+      console.log('[ProfileScreen] Clearing expense context...');
+      clearAllExpenses();
+
+      // Reset Supabase client's internal state
+      console.log('[ProfileScreen] Resetting Supabase client...');
+      await supabaseClient.auth.initialize();
+
+      // Navigate to login
+      console.log('[ProfileScreen] Navigating to login...');
       router.replace('/login');
-      
-    } catch (e) {
-      console.error('[ProfileScreen] Error during logout:', e);
-      Alert.alert('Error', 'Failed to logout. Please try again.');
-    } finally {
-      setLoading(false);
+    } catch (error) {
+      console.error('[ProfileScreen] Error during logout:', error);
+      Alert.alert('Error', 'Failed to log out. Please try again.');
     }
+  };
+
+  const confirmLogout = () => {
+    Alert.alert(
+      'Confirm Logout',
+      'Are you sure you want to log out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Logout',
+          style: 'destructive',
+          onPress: handleLogout
+        }
+      ]
+    );
   };
 
   return (
@@ -86,11 +80,11 @@ export default function ProfileScreen() {
       <View style={styles.profileHeader}>
         <View style={styles.profileImageContainer}>
           <Text style={styles.profileInitial}>
-            {username ? username.charAt(0).toUpperCase() : (userEmail ? userEmail.charAt(0).toUpperCase() : 'U')}
+            {username ? username.charAt(0).toUpperCase() : (email ? email.charAt(0).toUpperCase() : 'U')}
           </Text>
         </View>
         <Text style={styles.userName}>{username || 'User Profile'}</Text>
-        <Text style={styles.userEmail}>{userEmail || 'user@example.com'}</Text>
+        <Text style={styles.userEmail}>{email || 'user@example.com'}</Text>
       </View>
 
       {/* Settings Sections */}
@@ -133,12 +127,10 @@ export default function ProfileScreen() {
             <Ionicons name="notifications-outline" size={24} color="#5D3FD3" />
             <Text style={styles.settingLabel}>Notifications</Text>
           </View>
-          <Switch
-            value={notificationsEnabled}
-            onValueChange={setNotificationsEnabled}
-            trackColor={{ false: '#CCC', true: '#5D3FD3' }}
-            thumbColor="#FFF"
-          />
+          <View style={styles.settingValue}>
+            <Text style={styles.settingValueText}>Enabled</Text>
+            <Ionicons name="chevron-forward" size={20} color="#999" />
+          </View>
         </View>
         
         <View style={styles.settingRow}>
@@ -146,12 +138,10 @@ export default function ProfileScreen() {
             <Ionicons name="moon-outline" size={24} color="#5D3FD3" />
             <Text style={styles.settingLabel}>Dark Mode</Text>
           </View>
-          <Switch
-            value={darkModeEnabled}
-            onValueChange={setDarkModeEnabled}
-            trackColor={{ false: '#CCC', true: '#5D3FD3' }}
-            thumbColor="#FFF"
-          />
+          <View style={styles.settingValue}>
+            <Text style={styles.settingValueText}>Enabled</Text>
+            <Ionicons name="chevron-forward" size={20} color="#999" />
+          </View>
         </View>
         
         <TouchableOpacity style={styles.settingRow}>
@@ -186,7 +176,7 @@ export default function ProfileScreen() {
         </TouchableOpacity>
       </View>
       
-      <TouchableOpacity style={styles.logoutButton} onPress={() => handleLogout()}>
+      <TouchableOpacity style={styles.logoutButton} onPress={confirmLogout}>
         <Ionicons name="log-out-outline" size={20} color="#FF3B30" />
         <Text style={styles.logoutText}>Logout</Text>
       </TouchableOpacity>

@@ -10,11 +10,13 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter, useNavigation } from 'expo-router';
+import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../contexts/ThemeContext';
 import { useExpenses } from '../contexts/ExpenseContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { handlePaymentRedirect } from '../lib/paymentUtils';
+import supabaseClient from '../lib/supabaseClient';
 
 interface PaymentMethod {
   id: string;
@@ -31,26 +33,127 @@ interface FriendBalance {
 export default function SettleUpScreen() {
   const { colors } = useTheme();
   const router = useRouter();
-  const navigation = useNavigation();
   const { expenses } = useExpenses();
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [selectedFriend, setSelectedFriend] = useState<FriendBalance | null>(null);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [settledBalances, setSettledBalances] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadPaymentMethods();
+    loadSettledBalances();
   }, []);
+
+  // Reload payment methods when screen comes into focus
+  useFocusEffect(
+    React.useCallback(() => {
+      loadPaymentMethods();
+      loadSettledBalances();
+    }, [])
+  );
 
   const loadPaymentMethods = async () => {
     try {
-      const stored = await AsyncStorage.getItem('paymentMethods');
-      if (stored) {
-        setPaymentMethods(JSON.parse(stored));
+      // Check if we have a session
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      
+      if (sessionError) {
+        console.error("[SettleUpScreen] Session error:", sessionError);
+        throw new Error('Session error');
+      }
+
+      if (!session) {
+        console.error("[SettleUpScreen] No active session");
+        router.replace('/login');
+        return;
+      }
+
+      const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+      if (userError) throw userError;
+      if (!user) throw new Error('User not found');
+
+      const { data, error } = await supabaseClient
+        .from('profiles')
+        .select('Payment')
+        .eq('id', user.id)
+        .single();
+
+      if (error) throw error;
+      
+      // Convert the single payment string to PaymentMethod array format
+      if (data?.Payment) {
+        const paymentString = data.Payment;
+        const isVenmo = paymentString.startsWith('@');
+        const isCashApp = paymentString.startsWith('$');
+        
+        if (isVenmo || isCashApp) {
+          const paymentMethod: PaymentMethod = {
+            id: '1', // Single payment method, so we can use a fixed ID
+            type: isCashApp ? 'cashapp' : 'venmo',
+            username: paymentString,
+            displayName: isCashApp ? 'Cash App' : 'Venmo'
+          };
+          setPaymentMethods([paymentMethod]);
+        }
+      } else {
+        setPaymentMethods([]);
       }
     } catch (error) {
       console.error('Error loading payment methods:', error);
+      if (error.message?.includes('auth') || error.message?.includes('session')) {
+        Alert.alert('Session Expired', 'Please log in again.');
+        router.replace('/login');
+      } else {
+        // If we can't load from database, fallback to empty array
+        setPaymentMethods([]);
+      }
     }
+  };
+
+  const loadSettledBalances = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('settledBalances');
+      if (stored) {
+        setSettledBalances(new Set(JSON.parse(stored)));
+      }
+    } catch (error) {
+      console.error('Error loading settled balances:', error);
+    }
+  };
+
+  const saveSettledBalances = async (newSettledBalances: Set<string>) => {
+    try {
+      await AsyncStorage.setItem('settledBalances', JSON.stringify(Array.from(newSettledBalances)));
+    } catch (error) {
+      console.error('Error saving settled balances:', error);
+    }
+  };
+
+  const markAsSettled = (friendName: string) => {
+    Alert.alert(
+      'Mark as Settled',
+      `Mark balance with ${friendName} as settled?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark Settled',
+          onPress: () => {
+            const newSettledBalances = new Set(settledBalances);
+            newSettledBalances.add(friendName);
+            setSettledBalances(newSettledBalances);
+            saveSettledBalances(newSettledBalances);
+          },
+        },
+      ]
+    );
+  };
+
+  const unmarkAsSettled = (friendName: string) => {
+    const newSettledBalances = new Set(settledBalances);
+    newSettledBalances.delete(friendName);
+    setSettledBalances(newSettledBalances);
+    saveSettledBalances(newSettledBalances);
   };
 
   // Calculate friend balances (reusing logic from dashboard)
@@ -100,6 +203,10 @@ export default function SettleUpScreen() {
 
     return balances.sort((a, b) => a.name.localeCompare(b.name));
   }, [expenses]);
+
+  // Filter out settled balances for display
+  const activeBalances = friendBalances.filter(balance => !settledBalances.has(balance.name));
+  const settledBalancesList = friendBalances.filter(balance => settledBalances.has(balance.name));
 
   const handleSelectFriend = (friend: FriendBalance) => {
     setSelectedFriend(friend);
@@ -196,35 +303,10 @@ export default function SettleUpScreen() {
     );
   };
 
-  const handleBack = () => {
-    if (navigation.canGoBack()) {
-      router.back();
-    } else {
-      // If we can't go back, navigate to the home/dashboard
-      router.push('/(tabs)');
-    }
-  };
-
   const dynamicStyles = StyleSheet.create({
     container: {
       flex: 1,
       backgroundColor: colors.background,
-    },
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      padding: 16,
-      backgroundColor: colors.cardBackground,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.border,
-    },
-    backButton: {
-      marginRight: 16,
-    },
-    headerTitle: {
-      fontSize: 20,
-      fontWeight: 'bold',
-      color: colors.textDark,
     },
     content: {
       flex: 1,
@@ -294,12 +376,25 @@ export default function SettleUpScreen() {
     negativeAmount: {
       color: colors.dangerColor || '#FF3B30',
     },
+    buttonContainer: {
+      flexDirection: 'column',
+    },
     settleButton: {
       backgroundColor: colors.primaryColor,
       borderRadius: 8,
       paddingVertical: 12,
       paddingHorizontal: 20,
       alignItems: 'center',
+      minWidth: 80,
+      marginBottom: 8,
+    },
+    markSettledButton: {
+      backgroundColor: colors.successColor || '#34C759',
+      borderRadius: 8,
+      paddingVertical: 12,
+      paddingHorizontal: 20,
+      alignItems: 'center',
+      minWidth: 80,
     },
     settleButtonText: {
       color: '#FFFFFF',
@@ -424,21 +519,11 @@ export default function SettleUpScreen() {
 
   return (
     <View style={dynamicStyles.container}>
-      <View style={dynamicStyles.header}>
-        <TouchableOpacity
-          style={dynamicStyles.backButton}
-          onPress={handleBack}
-        >
-          <Ionicons name="chevron-back" size={24} color={colors.textDark} />
-        </TouchableOpacity>
-        <Text style={dynamicStyles.headerTitle}>Settle Up</Text>
-      </View>
-
       <ScrollView style={dynamicStyles.content}>
         <View style={dynamicStyles.section}>
           <Text style={dynamicStyles.sectionTitle}>Outstanding Balances</Text>
           
-          {friendBalances.length === 0 ? (
+          {activeBalances.length === 0 ? (
             <View style={dynamicStyles.emptyState}>
               <Ionicons name="checkmark-circle-outline" size={48} color={colors.successColor} />
               <Text style={dynamicStyles.emptyStateText}>
@@ -447,7 +532,7 @@ export default function SettleUpScreen() {
               </Text>
             </View>
           ) : (
-            friendBalances.map((friend, index) => {
+            activeBalances.map((friend, index) => {
               const isOwedToYou = friend.amount > 0;
               const avatarBgColor = isOwedToYou 
                 ? colors.successLight || 'rgba(52, 199, 89, 0.2)' 
@@ -480,17 +565,115 @@ export default function SettleUpScreen() {
                     </Text>
                   </View>
                   
-                  <TouchableOpacity
-                    style={dynamicStyles.settleButton}
-                    onPress={() => handleSelectFriend(friend)}
-                  >
-                    <Text style={dynamicStyles.settleButtonText}>
-                      {isOwedToYou ? 'Request' : 'Pay'}
-                    </Text>
-                  </TouchableOpacity>
+                  <View style={dynamicStyles.buttonContainer}>
+                    <TouchableOpacity
+                      style={dynamicStyles.settleButton}
+                      onPress={() => handleSelectFriend(friend)}
+                    >
+                      <Text style={dynamicStyles.settleButtonText}>
+                        {isOwedToYou ? 'Request' : 'Pay'}
+                      </Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity
+                      style={dynamicStyles.markSettledButton}
+                      onPress={() => markAsSettled(friend.name)}
+                    >
+                      <Text style={dynamicStyles.settleButtonText}>
+                        Mark Settled
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               );
             })
+          )}
+        </View>
+
+        <View style={dynamicStyles.section}>
+          <Text style={dynamicStyles.sectionTitle}>Settled Balances</Text>
+          {settledBalancesList.length === 0 ? (
+            <View style={dynamicStyles.emptyState}>
+              <Ionicons name="checkmark-circle-outline" size={48} color={colors.successColor} />
+              <Text style={dynamicStyles.emptyStateText}>
+                No settled balances.{'\n'}
+                Outstanding balances will appear here once marked as settled.
+              </Text>
+            </View>
+          ) : (
+            <>
+              {settledBalancesList.map((friend, index) => {
+                const isOwedToYou = friend.amount > 0;
+                const avatarBgColor = isOwedToYou 
+                  ? colors.successLight || 'rgba(52, 199, 89, 0.2)' 
+                  : colors.dangerLight || 'rgba(255, 59, 48, 0.2)';
+                
+                return (
+                  <View key={friend.name} style={dynamicStyles.balanceCard}>
+                    <View style={[dynamicStyles.avatarCircle, { backgroundColor: avatarBgColor }]}>
+                      <Text style={[
+                        dynamicStyles.avatarText, 
+                        { color: isOwedToYou ? colors.successColor : colors.dangerColor }
+                      ]}>
+                        {friend.name.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                    
+                    <View style={dynamicStyles.friendInfo}>
+                      <Text style={dynamicStyles.friendName}>{friend.name}</Text>
+                      <Text style={[
+                        dynamicStyles.balanceDescription,
+                        isOwedToYou ? dynamicStyles.positiveAmount : dynamicStyles.negativeAmount
+                      ]}>
+                        {isOwedToYou ? `${friend.name} owed you` : `You owed ${friend.name}`}
+                      </Text>
+                      <Text style={[
+                        dynamicStyles.balanceAmount,
+                        isOwedToYou ? dynamicStyles.positiveAmount : dynamicStyles.negativeAmount
+                      ]}>
+                        ${Math.abs(friend.amount).toFixed(2)} (Settled)
+                      </Text>
+                    </View>
+                    
+                    <TouchableOpacity
+                      style={[dynamicStyles.settleButton, { backgroundColor: colors.textMedium }]}
+                      onPress={() => unmarkAsSettled(friend.name)}
+                    >
+                      <Text style={dynamicStyles.settleButtonText}>
+                        Unmark
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+              
+              {settledBalancesList.length > 0 && (
+                <TouchableOpacity
+                  style={[dynamicStyles.markSettledButton, { backgroundColor: colors.dangerColor, marginTop: 16 }]}
+                  onPress={() => {
+                    Alert.alert(
+                      'Clear All Settled Balances',
+                      'Remove all settled balances from the list?',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Clear All',
+                          style: 'destructive',
+                          onPress: () => {
+                            setSettledBalances(new Set());
+                            saveSettledBalances(new Set());
+                          },
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Text style={dynamicStyles.settleButtonText}>
+                    Clear All Settled
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </>
           )}
         </View>
       </ScrollView>
